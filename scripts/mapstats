@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# Retrieve map kill and jump statistics.  Results are stored in a gzip'd snaphost file.
+#
+# $1 - assembly dir
+# $2 - output dir
+# $3 - tool dir
+
+# Check a header file for an OK response
+check_header() {
+  test "$(head -1 ${1} | sed -e 's/^[[:space:]]*//g' -e 's/[[:space:]]*$//g')" == "HTTP/1.1 200 OK"
+}
+
+# Get map jumps
+get_map_jumps() {
+    curl -s --compressed -X GET --header 'Accept: application/json' -D header_map_jumps.txt\
+     'https://esi.tech.ccp.is/latest/universe/system_jumps/?datasource=tranquility' > map_jumps.json
+}
+
+# Get map kills
+get_map_kills() {
+    curl -s --compressed -X GET --header 'Accept: application/json' -D header_map_kills.txt\
+     'https://esi.tech.ccp.is/latest/universe/system_kills/?datasource=tranquility' > map_kills.json
+}
+
+# Setup area to receive snapshots
+now=$(( $(date +"%s") * 1000 ))
+here=$(pwd)
+assembly=$1/map_ref_$$
+output_dir=$2
+tool_dir=$3
+mkdir -p ${assembly}
+trap "cd ${here} ; rm -rf ${assembly}" 0
+cd ${assembly}
+shift 3
+
+# Retrieve map jumps and map kills
+# Signal an error if either call has a non-200 response
+got_jumps=0
+for attempt in $(seq 3) ; do
+    get_map_jumps
+    if ! check_header header_map_jumps.txt ; then
+	echo "Error downloading map jumps, attempt ${attempt}"
+	rm -f map_jumps.json
+	sleep 5
+    else
+	got_jumps=1
+	break
+    fi
+done
+if [ ${got_jumps} -eq 0 ] ; then
+    echo "Failed to download map jumps, exiting"
+    exit 1
+fi
+got_kills=0
+for attempt in $(seq 3) ; do
+    get_map_kills
+    if ! check_header header_map_kills.txt ; then
+	echo "Error downloading map kills, attempt ${attempt}"
+	rm -f map_kills.json
+	sleep 5
+    else
+	got_kills=1
+	break
+    fi
+done
+if [ ${got_kills} -eq 0 ] ; then
+    echo "Failed to download map kills, exiting"
+    exit 1
+fi
+
+#
+# Store each jump and kill snapshot in the following locations:
+#
+# ${output_dir}/map_ref/jumps_${now}_${date}.gz
+# ${output_dir}/map_ref/kills_${now}_${date}.gz
+#
+# The jumps file has the format:
+#
+# Total number of entries
+# system_id, ship_jumps
+#
+# The kills file has the format:
+#
+# Total number of entries
+# system_id, ship_kills, npc_kills, pod_kills
+#
+mkdir -p ${output_dir}/map_ref
+jump_outfile=${assembly}/jumps_${now}_$(date -u +"%Y%m%d")
+cat map_jumps.json | jq -c '.[]|[.system_id, .ship_jumps]' | sed -e 's/\[//g' -e 's/\]//g' > ${jump_outfile}
+count=$(cat ${jump_outfile} | wc -l | tr -d '[:blank:]')
+echo -e "${count}\n$(cat ${jump_outfile})" > ${jump_outfile}
+gzip ${jump_outfile}
+mv ${jump_outfile}.gz ${output_dir}/map_ref
+
+kill_outfile=${assembly}/kills_${now}_$(date -u +"%Y%m%d")
+cat map_kills.json | jq -c '.[]|[.system_id, .ship_kills, .npc_kills, .pod_kills]' | sed -e 's/\[//g' -e 's/\]//g' > ${kill_outfile}
+count=$(cat ${kill_outfile} | wc -l | tr -d '[:blank:]')
+echo -e "${count}\n$(cat ${kill_outfile})" > ${kill_outfile}
+gzip ${kill_outfile}
+mv ${kill_outfile}.gz ${output_dir}/map_ref

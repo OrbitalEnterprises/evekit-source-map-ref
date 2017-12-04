@@ -1,0 +1,131 @@
+#!/bin/bash
+#
+# Drive execution of the mapstats downloader.  This script downloads map kills and jumps.
+#
+# $1 - config file
+#
+config=$1
+source_id=$(jq -r -c '.source_id' ${config})
+tmp_dir="$(jq -r -c '.tmp_dir' ${config})"
+snap_dir="$(jq -r -c '.snapshot_dir' ${config})"
+tool_home="$(jq -r -c '.tool_home' ${config})"
+cycle_time=$(jq -r -c '.cycle_time' ${config})
+tracker_description=mapref
+
+# Create a work area for this script
+here=$(pwd)
+work_dir=${tmp_dir}/maprefdriver_$$
+mkdir -p ${work_dir}
+trap "cd ${here} ; rm -rf ${work_dir}" 0
+cd ${work_dir}
+
+# Get now in milliseconds
+get_now() {
+    echo $(( $(date +"%s") * 1000 ))
+}
+
+# Return TID from tracked record
+get_tid() {
+    echo $(echo $1 | egrep -o 'tid=[0-9]+' | awk -F= '{print $2}')
+}
+
+# Return tracker start from tracked record
+get_tracker_start() {
+    echo $(echo $1 | egrep -o 'trackerStart=[0-9]+' | awk -F= '{print $2}')
+}
+
+# Create or return the start time of the next scheduled event for the snapshot downloader
+# If an argument exists, then it specifies a start delay in seconds
+get_or_create_tracker() {
+    # Check for existing unfinished tracker first
+    start_time=$(get_now)
+    if [ $# -gt 0 ] ; then
+	    start_time=$(( ${start_time} + ($1 * 1000) ))
+    fi
+
+    # Find current unfinished tracker
+    if ! tracked=$(${tool_home}/ekdptool tracker -s ${source_id} -d ${tracker_description} unfinished) ; then
+        echo "$? Fatal error finding unfinished tracker for ${tracker_description}: ${tracked}"
+	exit 1
+    fi
+
+    # If no existing unfinished tracker, then create one, start it, and retrieve information
+    if [ -z "${tracked}" ] ; then
+	    # No tracker, create one
+	    if ! tracked=$(${tool_home}/ekdptool tracker -s ${source_id} create ${tracker_description}) ; then
+	        echo "Fatal error creating tracker for ${tracker_description}"
+	        exit 1
+	    fi
+	    if ! (${tool_home}/ekdptool tracker -s ${source_id} -t ${tracked} start ${start_time}) ; then
+	        echo "Fatal error starting tracker for ${tracker_description}"
+	        exit 1
+	    fi
+	    tracked=$(${tool_home}/ekdptool tracker -s ${source_id} -d ${tracker_description} unfinished)
+    fi
+
+    # Return tracker
+    echo "${tracked}"
+}
+
+# Generate logging timestamp
+stamp() {
+    echo "$(date -u +'%Y%m%dT%H:%M:%S %Z')"
+}
+
+# Run forever
+while true ; do
+    # Verify we have a scheduled tracking event for the snapshot downloader
+    echo "$(stamp) Start retrieving trackers"
+    next_tracker=$(get_or_create_tracker)
+    tracker_start=$(get_tracker_start "${next_tracker}")
+    tracker_tid=$(get_tid "${next_tracker}")
+    echo "$(stamp) Finish retrieving trackers"
+
+    # If we're past the start time of the next tracker, go ahead and start it.
+    # Otherwise, we'll sleep until the correct start time.
+    now=$(get_now)
+    if [ ${tracker_start} -le ${now} ] ; then
+	# Under normal circumstances, we'll delay 60 minutes between snapshots
+	next_cycle=${cycle_time}
+	
+	# Retrieve map snapshot data and set tracker status based on output
+	echo "$(stamp) Starting retrieval: ${tracker_description}"
+	if ! ${tool_home}/mapstats "${tmp_dir}" "${snap_dir}" "${tool_home}" ; then
+	    echo "$(stamp) Failed to retrieve ${tracker_description}, we'll retry again in 5 minutes"
+	    next_cycle=5
+	    if ! (${tool_home}/ekdptool tracker -s ${source_id} -t ${tracker_tid} status ERROR) ; then
+		echo "$(stamp) Fatal error setting status for tracker for ${tracker_description}"
+		exit 1
+	    fi
+	else
+	    if ! (${tool_home}/ekdptool tracker -s ${source_id} -t ${tracker_tid} status FINISHED) ; then
+		echo "$(stamp) Fatal error setting status for tracker for ${tracker_description}"
+		exit 1
+	    fi
+	fi
+
+	# Finalize tracker
+	if ! (${tool_home}/ekdptool tracker -s ${source_id} -t ${tracker_tid} end) ; then
+	    echo "$(stamp) Fatal error ending tracker for ${tracker_description}"
+	    exit 1
+	fi
+
+	# Create tracker for next run
+	current=$(get_now)
+	next_time=$(( ${now} + ${cycle_time} * 60 * 60 * 1000 ))
+	delay=$(( (${next_time} - ${current})/1000 ))
+	if [ ${delay} -le 0 ] ; then
+	    delay=0
+	fi
+	get_or_create_tracker ${delay} > /dev/null
+	echo "$(stamp) Finished retrieval for ${tracker_description}, next retrieval in ${delay} seconds"
+    else
+	delay=$(( (${tracker_start} - ${now})/1000 ))
+	echo "$(stamp) Sleeping for ${delay} seconds until next scheduled retrieval for ${tracker_description}"
+	if [ ${delay} -lt 0 ] ; then
+	    delay=0
+	fi
+	sleep ${delay}
+    fi
+done
+
