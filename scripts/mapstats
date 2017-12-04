@@ -77,25 +77,21 @@ fi
 #
 # The jumps file has the format:
 #
-# Total number of entries
 # system_id, ship_jumps
 #
 # The kills file has the format:
 #
-# Total number of entries
 # system_id, ship_kills, npc_kills, pod_kills
 #
 mkdir -p ${output_dir}/map_ref
-jump_outfile=${assembly}/jumps_${now}_$(date -u +"%Y%m%d")
-cat map_jumps.json | jq -c '.[]|[.system_id, .ship_jumps]' | sed -e 's/\[//g' -e 's/\]//g' > ${jump_outfile}
-count=$(cat ${jump_outfile} | wc -l | tr -d '[:blank:]')
-echo -e "${count}\n$(cat ${jump_outfile})" > ${jump_outfile}
+jump_outfile=${assembly}/jumps_${now}_$(date -u +"%Y%m%d").csv
+echo "system_id,ship_jumps" > ${jump_outfile}
+cat map_jumps.json | jq -c '.[]|[.system_id, .ship_jumps]' | sed -e 's/\[//g' -e 's/\]//g' >> ${jump_outfile}
 gzip ${jump_outfile}
 mv ${jump_outfile}.gz ${output_dir}/map_ref
 
-kill_outfile=${assembly}/kills_${now}_$(date -u +"%Y%m%d")
-cat map_kills.json | jq -c '.[]|[.system_id, .ship_kills, .npc_kills, .pod_kills]' | sed -e 's/\[//g' -e 's/\]//g' > ${kill_outfile}
-count=$(cat ${kill_outfile} | wc -l | tr -d '[:blank:]')
-echo -e "${count}\n$(cat ${kill_outfile})" > ${kill_outfile}
+kill_outfile=${assembly}/kills_${now}_$(date -u +"%Y%m%d").csv
+echo "system_id,ship_kills,npc_kills,pod_kills" > ${kill_outfile}
+cat map_kills.json | jq -c '.[]|[.system_id, .ship_kills, .npc_kills, .pod_kills]' | sed -e 's/\[//g' -e 's/\]//g' >> ${kill_outfile}
 gzip ${kill_outfile}
 mv ${kill_outfile}.gz ${output_dir}/map_ref
